@@ -1,0 +1,33 @@
+name: "PolinRider Scanner"
+
+on:
+  workflow_call:
+    inputs:
+      fail-on-detection:
+        description: "Whether to fail the workflow on detection (default: true)"
+        type: boolean
+        default: true
+        required: false
+
+jobs:
+  scan:
+    name: "PolinRider Malware Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run PolinRider Scanner
+        id: scan
+        run: |
+          chmod +x ./scanners/polinrider/polinrider-scanner.sh
+          ./scanners/polinrider/polinrider-scanner.sh
+        continue-on-error: ${{ !inputs.fail-on-detection }}
+
+      - name: Report Findings
+        if: failure() && inputs.fail-on-detection
+        run: |
+          echo "::error::PolinRider indicators detected — merge blocked"
+          echo "::error::See https://github.com/luxodd/global-ci/blob/main/scanners/polinrider/README.md for remediation"
+          exit 1
