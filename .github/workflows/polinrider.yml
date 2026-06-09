@@ -1,0 +1,28 @@
+# PolinRider gate.
+#
+# This is the thin, logic-free stub that every repo can drop in to enforce the PolinRider
+# check via global-ci's reusable workflow. It is identical for every repo (here global-ci
+# gates its own PRs).
+#
+# Why pull_request_target: GitHub runs THIS file from the BASE/default branch, not from the
+# PR head — so a malicious PR cannot edit or disable the gate. The reusable workflow checks
+# out the PR head SHA and only greps it (no PR code is executed), which is safe under
+# pull_request_target.
+#
+# Required-check context to mark required in branch protection / ruleset:
+#   "scan / PolinRider Malware Scan"
+name: PolinRider Gate
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    uses: luxodd/global-ci/.github/workflows/polinrider-scan.yml@main
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+      fail-on-detection: true

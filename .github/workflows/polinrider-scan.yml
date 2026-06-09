@@ -1,33 +1,60 @@
-name: "PolinRider Scanner"
+# Reusable PolinRider scan. Single-sourced through scanners/polinrider/polinrider-scanner.sh
+# so the rules live in exactly one place (also reused by the gate App).
+#
+# Fix vs the previous version: the old workflow ran ./scanners/... from the *caller's*
+# checkout, where that script does not exist. Here we check out the CALLER's code AND the
+# trusted global-ci scanner separately, then run the scanner against the caller's tree.
+# We only read/grep the target code — it is never executed — so this is safe to drive from
+# a `pull_request_target` stub (which makes the gate tamper-proof against malicious PRs).
+name: "PolinRider Scan (reusable)"
 
 on:
   workflow_call:
     inputs:
-      fail-on-detection:
-        description: "Whether to fail the workflow on detection (default: true)"
-        type: boolean
-        default: true
+      ref:
+        description: "Commit SHA / ref of the target to scan (pass the PR head SHA)."
+        type: string
         required: false
+        default: ""
+      fail-on-detection:
+        description: "Fail the check when an indicator is found."
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
 
 jobs:
-  scan:
-    name: "PolinRider Malware Scan"
+  polinrider-scan:
+    name: "PolinRider Malware Scan"      # required-check context = "<caller-job> / PolinRider Malware Scan"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout target code (scanned, never executed)
+        uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.ref != '' && inputs.ref || github.sha }}
           fetch-depth: 0
+          persist-credentials: false
+          path: target
 
-      - name: Run PolinRider Scanner
-        id: scan
-        run: |
-          chmod +x ./scanners/polinrider/polinrider-scanner.sh
-          ./scanners/polinrider/polinrider-scanner.sh
+      - name: Checkout trusted scanner from global-ci
+        uses: actions/checkout@v4
+        with:
+          repository: luxodd/global-ci
+          ref: main
+          persist-credentials: false
+          path: global-ci
+
+      - name: Run PolinRider scanner against target
+        shell: bash
+        working-directory: target
+        run: bash "$GITHUB_WORKSPACE/global-ci/scanners/polinrider/polinrider-scanner.sh"
         continue-on-error: ${{ !inputs.fail-on-detection }}
 
-      - name: Report Findings
-        if: failure() && inputs.fail-on-detection
+      - name: Mark blocked on detection
+        if: failure()
         run: |
-          echo "::error::PolinRider indicators detected — merge blocked"
-          echo "::error::See https://github.com/luxodd/global-ci/blob/main/scanners/polinrider/README.md for remediation"
+          echo "::error::PolinRider indicators detected — merge blocked."
+          echo "::error::Remediation: https://github.com/luxodd/global-ci/blob/main/scanners/polinrider/README.md"
           exit 1

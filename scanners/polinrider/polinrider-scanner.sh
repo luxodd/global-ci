@@ -4,6 +4,8 @@
 set -euo pipefail
 
 FAILURES=0
+# Don't let the scanner flag its OWN rule definitions (so global-ci can be gated too).
+SELF_EX=(-- . ':(exclude)scanners/polinrider/*' ':(exclude).github/workflows/*polinrider*')
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m' # No Color
@@ -48,9 +50,9 @@ if [ -f ".vscode/tasks.json" ]; then
 fi
 
 # ── Check 4: PolinRider obfuscation signature ──────────────────────────
-if git grep -q 'rmcej%otb%' HEAD 2>/dev/null; then
+if git grep -q 'rmcej%otb%' HEAD "${SELF_EX[@]}" 2>/dev/null; then
   fail "PolinRider signature 'rmcej%otb%' found in tracked files"
-  git grep -l 'rmcej%otb%' HEAD 2>/dev/null | while read -r f; do
+  git grep -l 'rmcej%otb%' HEAD "${SELF_EX[@]}" 2>/dev/null | while read -r f; do
     echo "       -> $f"
   done
 else
@@ -58,9 +60,9 @@ else
 fi
 
 # ── Check 5: PolinRider global marker ──────────────────────────────────
-if git grep -q "global\['!'\]" HEAD 2>/dev/null; then
+if git grep -q "global\['!'\]" HEAD "${SELF_EX[@]}" 2>/dev/null; then
   fail "PolinRider global marker found in tracked files"
-  git grep -l "global\['!'\]" HEAD 2>/dev/null | while read -r f; do
+  git grep -l "global\['!'\]" HEAD "${SELF_EX[@]}" 2>/dev/null | while read -r f; do
     echo "       -> $f"
   done
 else
