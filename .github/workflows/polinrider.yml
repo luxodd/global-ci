@@ -1,4 +1,4 @@
-# PolinRider gate (Option A stub).
+# PolinRider gate.
 #
 # This is the thin, logic-free stub that every repo can drop in to enforce the PolinRider
 # check via global-ci's reusable workflow. It is identical for every repo (here global-ci
@@ -11,9 +11,6 @@
 #
 # Required-check context to mark required in branch protection / ruleset:
 #   "scan / PolinRider Malware Scan"
-#
-# NOTE: the `@main` reference resolves once the corrected reusable workflow
-# (.github/workflows/polinrider-scan.yml) is merged to global-ci main.
 name: PolinRider Gate
 
 on:
