@@ -91,6 +91,10 @@ jobs:
         with:
           projectPath: ${{ inputs.project-path }}
           targetPlatform: WebGL
+          # The platform's game version is minted server-side at deploy time;
+          # GameCI's semantic versioning would also fail outright on repos
+          # whose LFS migration leaves the tree dirty at checkout.
+          versioning: None
 
       - name: Zip build (contents at root, as the kiosk expects)
         run: |
