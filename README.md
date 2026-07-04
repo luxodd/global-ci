@@ -56,8 +56,8 @@ that publishes to the kiosk manifest). See `scripts/deploy-game.sh`.
          promote-production: ${{ github.event_name == 'workflow_dispatch' && inputs.promote }}
          game-id-staging: ${{ vars.LUXODD_GAME_ID_STAGING }}
          game-id-production: ${{ vars.LUXODD_GAME_ID_PROD }}
+         runner: unity-8core                # 8-core hosted, ~6.7 min build (see Build performance)
          # project-path: My-Nested-Project   # if the Unity project isn't at repo root
-         # runner: unity-builder             # self-hosted label; zero GitHub minutes (see Build performance)
        secrets: inherit
    ```
 
