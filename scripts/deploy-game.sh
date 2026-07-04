@@ -37,10 +37,11 @@ upload_url=$(jq -re '.upload_url' <<<"$init")
 version=$(jq -re '.version' <<<"$init")
 echo "Minted version $version — uploading to GCS"
 
+# shell redirect, not `-o /dev/null`: the latter + --retry exits 23 on some
+# curl builds (observed on mingw curl 8.19)
 curl -fsS --retry 3 --retry-all-errors -X PUT "$upload_url" \
   -H 'Content-Type: application/zip' \
-  --upload-file "$ZIP_PATH" \
-  -o /dev/null
+  --upload-file "$ZIP_PATH" >/dev/null
 
 echo "Upload done — publishing"
 complete=$(jq -n --arg v "$version" --arg commit "${COMMIT:-}" --arg repo "${REPO:-}" \
