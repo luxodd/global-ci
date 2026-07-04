@@ -1,9 +1,14 @@
 # Reusable Unity WebGL build + deploy pipeline for Luxodd game repos.
 #
 # Shape: build once (GameCI), deploy that exact artifact to staging
-# automatically, then hold the SAME artifact for production behind the
-# calling repo's "production" environment (configure required reviewers
-# there — that's the one-click prod gate). PR runs build only.
+# automatically on every main push. Production only ships from a manual
+# workflow_dispatch with promote-production=true — the same run builds,
+# stages, and promotes one artifact. PR runs build only.
+#
+# (Environment required-reviewers would be the cleaner prod gate, but that
+# needs GitHub Team for private repos. The `environment:` fields are kept
+# so deployment history works and reviewers start enforcing if the org
+# ever upgrades.)
 #
 # Callers pass `secrets: inherit`; these org-level secret names are assumed:
 #   UNITY_EMAIL, UNITY_PASSWORD, UNITY_LICENSE   (UNITY_SERIAL for Pro seats)
@@ -42,6 +47,11 @@ on:
         type: boolean
         required: false
         default: true
+      promote-production:
+        description: "Also deploy to production (manual dispatch only)"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -140,11 +150,9 @@ jobs:
   deploy-production:
     name: Deploy to production
     needs: [build, deploy-staging]
-    if: inputs.deploy
+    if: inputs.deploy && inputs.promote-production
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Required reviewers on the calling repo's `production` environment make
-    # this the approval gate; the artifact is byte-identical to staging's.
     environment: production
     steps:
       - name: Preflight

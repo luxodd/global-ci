@@ -5,9 +5,14 @@ Reusable CI checks and pipelines shared across **all** Luxodd repositories. Scan
 ## Game deploy pipeline (`unity-webgl-deploy.yml`)
 
 Push-to-ship pipeline for Unity WebGL game repos: every push to `main` builds
-via [GameCI](https://game.ci) and auto-deploys the zip to **staging**; the
-same artifact then waits for a one-click approval on the repo's `production`
-environment before shipping to prod. PRs get a validation build only.
+via [GameCI](https://game.ci) and auto-deploys the zip to **staging**. To ship
+prod, run the workflow manually (Actions → Build & Deploy → Run workflow) with
+the **promote** box checked — one run builds, stages, and promotes the same
+artifact. PRs get a validation build only.
+
+> Environment required-reviewers would make prod a true approval gate, but
+> that needs GitHub Team for private repos. If the org upgrades, reviewers on
+> each repo's `production` environment start enforcing automatically.
 
 Deploys talk to the game server's `/api/games/{gameID}/deploy/initiate` +
 `/deploy/complete` endpoints (signed-URL upload to GCS, then a version bump
@@ -25,6 +30,11 @@ that publishes to the kiosk manifest). See `scripts/deploy-game.sh`.
      pull_request:
        branches: [main]
      workflow_dispatch:
+       inputs:
+         promote:
+           description: "Also deploy to PRODUCTION"
+           type: boolean
+           default: false
 
    permissions:
      contents: read
@@ -38,6 +48,7 @@ that publishes to the kiosk manifest). See `scripts/deploy-game.sh`.
        uses: luxodd/global-ci/.github/workflows/unity-webgl-deploy.yml@main
        with:
          deploy: ${{ github.event_name != 'pull_request' }}
+         promote-production: ${{ github.event_name == 'workflow_dispatch' && inputs.promote }}
          game-id-staging: ${{ vars.LUXODD_GAME_ID_STAGING }}
          game-id-production: ${{ vars.LUXODD_GAME_ID_PROD }}
          # project-path: My-Nested-Project   # if the Unity project isn't at repo root
@@ -47,9 +58,9 @@ that publishes to the kiosk manifest). See `scripts/deploy-game.sh`.
 2. Set repository **variables** `LUXODD_GAME_ID_STAGING` and
    `LUXODD_GAME_ID_PROD` to the game's UUID in each environment's DB (from
    the admin console games list).
-3. Create the `production` environment (Settings → Environments) with a
-   required reviewer — that reviewer's approval is the prod gate. The
-   `staging` environment is auto-created ungated.
+3. Environments `staging` and `production` are auto-created on first run.
+   On a GitHub Team plan, add required reviewers to `production` for a true
+   approval gate; on the free plan the gate is the manual promote dispatch.
 4. Org-level secrets used (already shared with all repos): `UNITY_EMAIL`,
    `UNITY_PASSWORD`, `UNITY_LICENSE` (+ `UNITY_SERIAL` for Pro),
    `GAME_DEPLOY_API_KEY_STAGING`, `GAME_DEPLOY_API_KEY_PROD`.
