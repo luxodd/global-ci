@@ -27,8 +27,13 @@ that publishes to the kiosk manifest). See `scripts/deploy-game.sh`.
    on:
      push:
        branches: [main]
+       # Only build when something that affects the build changes — skip
+       # docs/CI-only commits so they don't burn ~16 min of runner time.
+       # Nested projects: prefix with the project path, e.g. My-Project/Assets/**
+       paths: ['Assets/**', 'Packages/**', 'ProjectSettings/**']
      pull_request:
        branches: [main]
+       paths: ['Assets/**', 'Packages/**', 'ProjectSettings/**']
      workflow_dispatch:
        inputs:
          promote:
@@ -52,6 +57,7 @@ that publishes to the kiosk manifest). See `scripts/deploy-game.sh`.
          game-id-staging: ${{ vars.LUXODD_GAME_ID_STAGING }}
          game-id-production: ${{ vars.LUXODD_GAME_ID_PROD }}
          # project-path: My-Nested-Project   # if the Unity project isn't at repo root
+         # runner: unity-builder             # self-hosted label; zero GitHub minutes (see Build performance)
        secrets: inherit
    ```
 
@@ -65,7 +71,39 @@ that publishes to the kiosk manifest). See `scripts/deploy-game.sh`.
    `UNITY_PASSWORD`, `UNITY_LICENSE` (+ `UNITY_SERIAL` for Pro),
    `GAME_DEPLOY_API_KEY_STAGING`, `GAME_DEPLOY_API_KEY_PROD`.
 
-## Available Scanners
+### Build performance & runner minutes
+
+Measured on helix-jump (GitHub-hosted `ubuntu-latest`, 2-core, 1x billing):
+
+| Build | Wall clock | Notes |
+|-------|-----------|-------|
+| Cold (no cache) | ~99 min | First build, or after the Library cache is evicted |
+| Warm (Library cache hit) | **~16 min** | 91% of it is the `Build` step: ~8GB Unity image pull + IL2CPP→wasm compile |
+
+The `Library` cache (already wired in) is what turns 99 min into 16. It holds
+~1.8GB of imported-asset + IL2CPP artifacts. GitHub evicts a cache after **7
+days without a hit**, so a game left untouched for a week pays the 99-min cold
+cost on its next build.
+
+At Team-plan **3,000 included min/month**, ~16-min warm builds give ~180
+builds/month before overage ($0.008/min after). So for moderate cadence the
+caching already handles it — the levers below matter as build frequency grows.
+
+**To spend fewer minutes, in order of impact:**
+
+1. **Path filters (free, already in the template above).** Docs/CI-only commits
+   don't trigger a build.
+2. **Self-hosted runner — the real lever if minutes are the concern.** Set
+   `runner:` to a self-hosted label. Zero GitHub minutes, and the ~8GB Unity
+   image + Library both persist on local disk between runs (no re-pull, no
+   cache restore, no 7-day eviction → no more cold 99-min builds). A warm
+   self-hosted build lands around 8–10 min at **no per-minute cost**. Trade-off
+   is running a machine (a spare box or a ~$30–60/mo cloud VM with room for the
+   image + caches) and keeping it patched. Worth it once builds are frequent or
+   you want the minutes bill to be predictable/zero.
+3. **Avoid bigger GitHub-hosted runners.** 4/8/16-core bill at 2x/4x/8x per
+   minute, and this build barely parallelizes (image pull + largely serial
+   compile), so they cost *more* total, not less.
 
 ## Available Scanners
 
