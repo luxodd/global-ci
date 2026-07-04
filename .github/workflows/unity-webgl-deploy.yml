@@ -1,0 +1,175 @@
+# Reusable Unity WebGL build + deploy pipeline for Luxodd game repos.
+#
+# Shape: build once (GameCI), deploy that exact artifact to staging
+# automatically, then hold the SAME artifact for production behind the
+# calling repo's "production" environment (configure required reviewers
+# there — that's the one-click prod gate). PR runs build only.
+#
+# Callers pass `secrets: inherit`; these org-level secret names are assumed:
+#   UNITY_EMAIL, UNITY_PASSWORD, UNITY_LICENSE   (UNITY_SERIAL for Pro seats)
+#   GAME_DEPLOY_API_KEY_STAGING, GAME_DEPLOY_API_KEY_PROD
+#
+# The calling repo must define environments `staging` and `production`
+# (production with required reviewers) or the deploy jobs run ungated.
+name: Unity WebGL Deploy (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      game-id-staging:
+        description: "Game UUID in the staging DB"
+        type: string
+        required: true
+      game-id-production:
+        description: "Game UUID in the production DB"
+        type: string
+        required: true
+      server-url-staging:
+        type: string
+        required: false
+        default: "https://staging-app.luxodd.com"
+      server-url-production:
+        type: string
+        required: false
+        default: "https://app.luxodd.com"
+      project-path:
+        description: "Path to the Unity project within the repo"
+        type: string
+        required: false
+        default: "."
+      deploy:
+        description: "Deploy after building (false for PR validation builds)"
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: WebGL build
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      # The Unity editor image + Library folder need more disk than the
+      # runner has free by default.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Cache Library
+        uses: actions/cache@v4
+        with:
+          path: ${{ inputs.project-path }}/Library
+          key: Library-WebGL-${{ hashFiles(format('{0}/Packages/manifest.json', inputs.project-path), format('{0}/Packages/packages-lock.json', inputs.project-path), format('{0}/ProjectSettings/ProjectVersion.txt', inputs.project-path)) }}
+          restore-keys: |
+            Library-WebGL-
+
+      - name: Build
+        uses: game-ci/unity-builder@v4
+        env:
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
+        with:
+          projectPath: ${{ inputs.project-path }}
+          targetPlatform: WebGL
+
+      - name: Zip build (contents at root, as the kiosk expects)
+        run: |
+          sudo chown -R "$USER" build
+          index=$(find build/WebGL -maxdepth 3 -name index.html | head -1)
+          if [ -z "$index" ]; then
+            echo "::error::no index.html in build output — WebGL build failed?"
+            find build -maxdepth 3 -type d
+            exit 1
+          fi
+          cd "$(dirname "$index")"
+          zip -r -q "$GITHUB_WORKSPACE/game.zip" .
+          du -h "$GITHUB_WORKSPACE/game.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: game-zip-${{ github.sha }}
+          path: game.zip
+          retention-days: 14
+          if-no-files-found: error
+
+  deploy-staging:
+    name: Deploy to staging
+    needs: build
+    if: inputs.deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: staging
+    steps:
+      - name: Preflight
+        if: inputs.game-id-staging == ''
+        run: |
+          echo "::error::game-id-staging is empty — set the LUXODD_GAME_ID_STAGING repository variable (Settings > Secrets and variables > Actions > Variables) to this game's UUID in the staging DB."
+          exit 1
+
+      - name: Checkout deploy script from global-ci
+        uses: actions/checkout@v4
+        with:
+          repository: luxodd/global-ci
+          ref: main
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: game-zip-${{ github.sha }}
+
+      - name: Deploy
+        env:
+          SERVER_URL: ${{ inputs.server-url-staging }}
+          GAME_ID: ${{ inputs.game-id-staging }}
+          DEPLOY_KEY: ${{ secrets.GAME_DEPLOY_API_KEY_STAGING }}
+          ZIP_PATH: game.zip
+          COMMIT: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: bash scripts/deploy-game.sh
+
+  deploy-production:
+    name: Deploy to production
+    needs: [build, deploy-staging]
+    if: inputs.deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Required reviewers on the calling repo's `production` environment make
+    # this the approval gate; the artifact is byte-identical to staging's.
+    environment: production
+    steps:
+      - name: Preflight
+        if: inputs.game-id-production == ''
+        run: |
+          echo "::error::game-id-production is empty — set the LUXODD_GAME_ID_PROD repository variable (Settings > Secrets and variables > Actions > Variables) to this game's UUID in the production DB."
+          exit 1
+
+      - name: Checkout deploy script from global-ci
+        uses: actions/checkout@v4
+        with:
+          repository: luxodd/global-ci
+          ref: main
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: game-zip-${{ github.sha }}
+
+      - name: Deploy
+        env:
+          SERVER_URL: ${{ inputs.server-url-production }}
+          GAME_ID: ${{ inputs.game-id-production }}
+          DEPLOY_KEY: ${{ secrets.GAME_DEPLOY_API_KEY_PROD }}
+          ZIP_PATH: game.zip
+          COMMIT: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: bash scripts/deploy-game.sh
