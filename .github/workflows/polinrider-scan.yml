@@ -48,6 +48,8 @@ jobs:
       - name: Run PolinRider scanner against target
         shell: bash
         working-directory: target
+        env:
+          POLINRIDER_SCAN_SELF: ${{ github.repository == job.workflow_repository && '1' || '0' }}
         run: bash "$GITHUB_WORKSPACE/global-ci/scanners/polinrider/polinrider-scanner.sh"
         continue-on-error: ${{ !inputs.fail-on-detection }}
 

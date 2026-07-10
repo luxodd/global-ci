@@ -4,8 +4,25 @@
 set -euo pipefail
 
 FAILURES=0
-# Don't let the scanner flag its OWN rule definitions (so global-ci can be gated too).
-SELF_EX=(-- . ':(exclude)scanners/polinrider/*' ':(exclude).github/workflows/*polinrider*')
+# The scanner's own rule file contains the very signatures it greps for, so scanning
+# global-ci itself would false-positive. Apply those path exclusions ONLY when this repo is
+# the scanner's home. POLINRIDER_SCAN_SELF is set authoritatively by the reusable workflow
+# (1 only when the scanned repo is the workflow's own repo, which a PR author cannot forge).
+# Outside CI (local runs) it is unset, so detect the home repo by whether this repo tracks
+# the scanner script.
+SCAN_SELF="${POLINRIDER_SCAN_SELF:-}"
+if [ -z "$SCAN_SELF" ]; then
+  if git ls-files --error-unmatch scanners/polinrider/polinrider-scanner.sh >/dev/null 2>&1; then
+    SCAN_SELF=1
+  else
+    SCAN_SELF=0
+  fi
+fi
+if [ "$SCAN_SELF" = 1 ]; then
+  SELF_EX=(-- . ':(exclude)scanners/polinrider/*' ':(exclude).github/workflows/*polinrider*')
+else
+  SELF_EX=(-- .)
+fi
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m' # No Color
