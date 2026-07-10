@@ -29,6 +29,12 @@ jobs:
     name: "PolinRider Malware Scan"      # required-check context = "<caller-job> / PolinRider Malware Scan"
     runs-on: ubuntu-latest
     steps:
+      - name: Refuse to scan with an empty ref
+        if: inputs.ref == ''
+        run: |
+          echo "::error::ref input is empty - refusing to scan (an empty ref makes checkout fall back to the base branch, hiding the PR head)."
+          exit 1
+
       - name: Checkout target code (scanned, never executed)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:

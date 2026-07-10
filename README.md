@@ -10,13 +10,24 @@ Reusable CI checks enforced across **all** Luxodd repositories. Each scanner liv
 
 ## How to add a scanner to your repo
 
-Add this to your repo's `.github/workflows/ci.yml` (or any workflow that runs on PRs):
+Drop this in as `.github/workflows/polinrider.yml`. It runs on `pull_request_target` so the gate is evaluated from your base branch (a malicious PR cannot disable it), and it passes the PR head SHA as the required `ref` (the scan only reads the PR head, it never executes it):
 
 ```yaml
+name: PolinRider Gate
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
 jobs:
-  polinrider:
+  scan:
     uses: luxodd/global-ci/.github/workflows/polinrider-scan.yml@main
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+      fail-on-detection: true
 ```
+
+Pin `@main` to a specific commit SHA (for example `@<sha> # v1.0.0`) so a change to global-ci cannot alter your gate.
 
 To make it a **required check** for merging to main:
 1. Go to your repo → Settings → Branches → Branch protection rules

@@ -11,6 +11,13 @@ FAILURES=0
 # Outside CI (local runs) it is unset, so detect the home repo by whether this repo tracks
 # the scanner script.
 SCAN_SELF="${POLINRIDER_SCAN_SELF:-}"
+# In CI the reusable workflow always sets POLINRIDER_SCAN_SELF explicitly. If it is missing
+# there, fail loud rather than silently trusting the local auto-detect below (which a repo
+# could game by tracking any file at the scanner's path).
+if [ "${GITHUB_ACTIONS:-}" = "true" ] && [ -z "$SCAN_SELF" ]; then
+  echo "polinrider-scanner: POLINRIDER_SCAN_SELF must be set when running under GitHub Actions" >&2
+  exit 2
+fi
 if [ -z "$SCAN_SELF" ]; then
   if git ls-files --error-unmatch scanners/polinrider/polinrider-scanner.sh >/dev/null 2>&1; then
     SCAN_SELF=1
