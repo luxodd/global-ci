@@ -14,8 +14,7 @@ on:
       ref:
         description: "Commit SHA / ref of the target to scan (pass the PR head SHA)."
         type: string
-        required: false
-        default: ""
+        required: true
       fail-on-detection:
         description: "Fail the check when an indicator is found."
         type: boolean
@@ -30,25 +29,33 @@ jobs:
     name: "PolinRider Malware Scan"      # required-check context = "<caller-job> / PolinRider Malware Scan"
     runs-on: ubuntu-latest
     steps:
+      - name: Refuse to scan with an empty ref
+        if: inputs.ref == ''
+        run: |
+          echo "::error::ref input is empty - refusing to scan (an empty ref makes checkout fall back to the base branch, hiding the PR head)."
+          exit 1
+
       - name: Checkout target code (scanned, never executed)
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: ${{ inputs.ref != '' && inputs.ref || github.sha }}
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
           persist-credentials: false
           path: target
 
       - name: Checkout trusted scanner from global-ci
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          repository: luxodd/global-ci
-          ref: main
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           persist-credentials: false
           path: global-ci
 
       - name: Run PolinRider scanner against target
         shell: bash
         working-directory: target
+        env:
+          POLINRIDER_SCAN_SELF: ${{ github.repository == job.workflow_repository && '1' || '0' }}
         run: bash "$GITHUB_WORKSPACE/global-ci/scanners/polinrider/polinrider-scanner.sh"
         continue-on-error: ${{ !inputs.fail-on-detection }}
 
