@@ -50,7 +50,11 @@ that publishes to the kiosk manifest). See `scripts/deploy-game.sh`.
 
    jobs:
      pipeline:
-       uses: luxodd/global-ci/.github/workflows/unity-webgl-deploy.yml@main
+       # Pin to a commit SHA, never @main. The deploy script is fetched at
+       # this workflow's own commit, so pinning here pins the code that runs
+       # with production deploy credentials. @main leaves both movable, which
+       # means whoever can push global-ci can change what deploys to prod.
+       uses: luxodd/global-ci/.github/workflows/unity-webgl-deploy.yml@<COMMIT_SHA>
        with:
          deploy: ${{ github.event_name != 'pull_request' }}
          promote-production: ${{ github.event_name == 'workflow_dispatch' && inputs.promote }}
@@ -58,8 +62,20 @@ that publishes to the kiosk manifest). See `scripts/deploy-game.sh`.
          game-id-production: ${{ vars.LUXODD_GAME_ID_PROD }}
          runner: unity-8core                # 8-core hosted, ~6.7 min build (see Build performance)
          # project-path: My-Nested-Project   # if the Unity project isn't at repo root
-       secrets: inherit
+       # Pass secrets explicitly. `secrets: inherit` would hand this workflow
+       # every secret the repo can see, not just the ones it needs.
+       secrets:
+         UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+         UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+         UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+         UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
+         GAME_DEPLOY_API_KEY_STAGING: ${{ secrets.GAME_DEPLOY_API_KEY_STAGING }}
+         GAME_DEPLOY_API_KEY_PROD: ${{ secrets.GAME_DEPLOY_API_KEY_PROD }}
    ```
+
+   Replace `<COMMIT_SHA>` with the current pinned revision of
+   `unity-webgl-deploy.yml`. Bumping it is a deliberate, reviewable change in
+   each game repo, which is the point.
 
 2. Set repository **variables** `LUXODD_GAME_ID_STAGING` and
    `LUXODD_GAME_ID_PROD` to the game's UUID in each environment's DB (from
