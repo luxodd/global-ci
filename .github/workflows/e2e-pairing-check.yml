@@ -1,0 +1,239 @@
+# Reusable e2e-pairing check.
+#
+# WHAT IT IS FOR. The end-to-end specs live in luxodd/luxodd_e2e, so a product
+# change and the spec change covering it cannot merge atomically. preview-e2e
+# and the luxodd_e2e dispatch path now resolve the suite revision from the pull
+# request -- an "e2e-branch: <ref>" line in the body, or a branch of the same
+# name -- which removes the merge-order trap. This check is what makes that
+# convention discoverable: it reports, on every pull request, which suite
+# revision the PR resolves to and whether that is what the author intended.
+#
+# WHY IT DEFAULTS TO ADVISORY, AND THE NUMBER BEHIND THAT. Replaying the rules
+# over the last 100 merged pull requests in each of admin, ext-game-server-
+# frontend, server and cabinet (400 in total), a BLOCKING version keyed on
+# changed paths would have failed 303 of them -- 76%. Most product changes
+# genuinely need no spec change, so "you touched src/, therefore pair a branch"
+# is not a true premise, and a check that is wrong three times in four teaches
+# people to type "e2e-branch: none" without reading. So the default is
+# advisory: it always concludes success and says what it found. Set
+# enforcement: required only once covered_paths has been narrowed to paths that
+# really do imply a spec change, and re-run that measurement first.
+#
+# WHY THE LOGIC IS HERE. Four copies of a resolution rule is the duplication
+# this whole effort exists to remove, and the recon that preceded it found real
+# drift in the checks that were copied: three of the four repos carry a bot
+# test that no longer matches the release bot. Callers pass only what genuinely
+# differs -- their own paths.
+name: "E2E Pairing Check (reusable)"
+
+on:
+  workflow_call:
+    inputs:
+      covered_paths:
+        description: >-
+          Newline-separated globs, repo-relative, naming paths whose change the
+          e2e suite could observe. A leading "!" excludes. Matched with bash
+          `case`, where `*` crosses `/`, so "src/*" covers the whole subtree;
+          "**" is accepted and behaves the same way.
+        type: string
+        required: true
+      enforcement:
+        description: >-
+          "advisory" (default) reports and always succeeds. "required" fails a
+          covered PR that names no pairing. Do not set "required" without first
+          measuring how many recent PRs it would have failed.
+        type: string
+        required: false
+        default: advisory
+      bypass_labels:
+        description: Newline-separated PR labels that skip the check entirely.
+        type: string
+        required: false
+        default: |
+          hotfix
+          urgent
+          no-e2e
+      suite_repo:
+        description: The repository holding the specs.
+        type: string
+        required: false
+        default: luxodd/luxodd_e2e
+    secrets:
+      SUITE_READ_TOKEN:
+        description: >-
+          A token with READ access to suite_repo, used only to ask whether a
+          branch exists. Every product repo already holds E2E_REPO_TOKEN for
+          dispatching into luxodd_e2e; pass that. Declared explicitly rather
+          than taken via `secrets: inherit`, so this workflow receives one
+          credential instead of every credential its caller holds. Note that
+          CROSS_REPO_PAT is NOT present in cabinet and would not work there.
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-pairing:
+    name: "E2E Pairing"     # required-check context = "<caller-job> / E2E Pairing"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # No checkout. This job reads pull-request METADATA and never fetches or
+      # runs the contributor's code, which is what makes it safe to drive from
+      # a `pull_request_target` stub -- the same argument polinrider-scan.yml
+      # makes, and the reason the gate cannot be disabled by the PR it guards.
+      - name: Resolve the paired spec revision
+        env:
+          GH_TOKEN: ${{ secrets.SUITE_READ_TOKEN }}
+          SUITE_REPO: ${{ inputs.suite_repo }}
+          COVERED_PATHS: ${{ inputs.covered_paths }}
+          ENFORCEMENT: ${{ inputs.enforcement }}
+          BYPASS_LABELS: ${{ inputs.bypass_labels }}
+          # Author-controlled, and passed as environment variables on purpose:
+          # `${{ github.event.pull_request.body }}` inline in a run: block is a
+          # shell-injection sink, and a PR body is the easiest thing on GitHub
+          # for an outsider to write.
+          PR_BODY: ${{ github.event.pull_request.body }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # Comma-joined: a GitHub expression cannot embed a newline cleanly.
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          SOURCE_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+
+          COVERED_HITS=""
+          note() { printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"; }
+
+          branch_exists() { gh api "repos/${SUITE_REPO}/branches/$1" >/dev/null 2>&1; }
+
+          # Later patterns win, so an exclusion placed after an inclusion
+          # removes those files -- the order callers naturally write.
+          is_covered() {
+            local f="$1" g pat hit=1
+            while IFS= read -r g; do
+              [ -z "$g" ] && continue
+              case "$g" in
+                '!'*) pat="${g#!}"
+                      # shellcheck disable=SC2254
+                      case "$f" in $pat) hit=1 ;; esac ;;
+                *)    # shellcheck disable=SC2254
+                      case "$f" in $g) hit=0 ;; esac ;;
+              esac
+            done <<<"${COVERED_PATHS}"
+            return $hit
+          }
+
+          in_list() {
+            local needle="$1" hay="$2" x
+            while IFS= read -r x; do
+              [ -n "$x" ] && [ "$needle" = "$x" ] && return 0
+            done <<<"$hay"
+            return 1
+          }
+
+          # No bot can reason about specs, and the release bot's real login is a
+          # GitHub App account, not "release-please[bot]" -- three of the four
+          # repos already carry a stale exact-match test that never fires.
+          is_bot() {
+            case "$1" in
+              *'[bot]') return 0 ;;
+              *release-please*) return 0 ;;
+            esac
+            return 1
+          }
+
+          VERDICT=""; DETAIL=""
+          decide() { VERDICT="$1"; DETAIL="$2"; }
+
+          # ---- exemptions --------------------------------------------------
+          BYPASSED=""
+          while IFS= read -r l; do
+            [ -n "$l" ] && in_list "$l" "$BYPASS_LABELS" && BYPASSED="$l"
+          done <<<"$(printf '%s' "${PR_LABELS}" | tr ',' '\n')"
+
+          if [ "${PR_DRAFT}" = "true" ]; then
+            decide SKIP "draft pull request"
+          elif is_bot "${PR_AUTHOR}"; then
+            decide SKIP "author ${PR_AUTHOR} is an automation account"
+          elif [ -n "$BYPASSED" ]; then
+            decide SKIP "the '${BYPASSED}' label bypasses this check"
+          else
+            # ---- covered paths ---------------------------------------------
+            CHANGED=$(gh api --paginate "repos/${SOURCE_REPO}/pulls/${PR_NUMBER}/files" --jq '.[].filename')
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              is_covered "$f" && COVERED_HITS="${COVERED_HITS}${f}"$'\n'
+            done <<<"$CHANGED"
+
+            if [ -z "$COVERED_HITS" ]; then
+              decide PASS "no files the e2e suite observes were changed"
+            else
+              # ---- the directive -------------------------------------------
+              LINE=$(printf '%s' "${PR_BODY}" | tr -d '\r' \
+                | grep -iEm1 '^[[:space:]]*e2e-branch:[[:space:]]*[^[:space:]]+' || true)
+              DIRECTIVE=$(printf '%s' "$LINE" | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d '[:space:]')
+
+              if [ -n "$DIRECTIVE" ]; then
+                case "$DIRECTIVE" in
+                  none) decide PASS "author declared no spec change is needed" ;;
+                  main) decide PASS "author pinned the suite to main" ;;
+                  *)
+                    if ! printf '%s' "$DIRECTIVE" | grep -qE '^[A-Za-z0-9._/-]{1,200}$' \
+                      || printf '%s' "$DIRECTIVE" | grep -q '\.\.'; then
+                      decide UNPAIRED "the e2e-branch line is not a valid branch name"
+                    elif branch_exists "$DIRECTIVE"; then
+                      decide PASS "paired with ${SUITE_REPO}@${DIRECTIVE}, named in the PR body"
+                    else
+                      decide UNPAIRED "the PR body names ${SUITE_REPO}@${DIRECTIVE}, which does not exist"
+                    fi ;;
+                esac
+              elif [ -n "${HEAD_REF}" ] && [ "${HEAD_REF}" != "null" ] && branch_exists "${HEAD_REF}"; then
+                decide PASS "paired with ${SUITE_REPO}@${HEAD_REF}, a branch of the same name"
+              else
+                decide UNPAIRED "changes files the e2e suite observes and names no paired spec branch"
+              fi
+            fi
+          fi
+
+          # ---- report ------------------------------------------------------
+          note "### E2E pairing"
+          note ""
+
+          if [ "$VERDICT" != "UNPAIRED" ]; then
+            echo "::notice::${DETAIL}"
+            note "${VERDICT} - ${DETAIL}."
+            note ""
+            note "Preview E2E will run the suite at the revision named above."
+            exit 0
+          fi
+
+          note "This pull request ${DETAIL}."
+          note ""
+          note "The specs live in \`${SUITE_REPO}\`, a separate repository, so they cannot merge alongside this change. If a spec change goes with it, say which branch:"
+          note ""
+          note '```'
+          note "e2e-branch: your-branch-name"
+          note '```'
+          note ""
+          note "Put that line anywhere in this PR's description. Preview E2E then checks out **that** revision, so your spec change is exercised against your own preview instead of being tested by specs that predate it. Naming the suite branch the same as \`${HEAD_REF}\` also works, with no line at all."
+          note ""
+          note "If no spec change is needed, \`e2e-branch: none\` says so on the record."
+          note ""
+          note "<details><summary>Files this PR changed that the suite observes</summary>"
+          note ""
+          while IFS= read -r h; do [ -n "$h" ] && note "- \`$h\`"; done <<<"$COVERED_HITS"
+          note ""
+          note "</details>"
+
+          if [ "$ENFORCEMENT" = "required" ]; then
+            echo "::error::${DETAIL}"
+            exit 1
+          fi
+
+          note ""
+          note "_Advisory: this check does not block the merge._"
+          echo "::warning::${DETAIL} (advisory)"
+          exit 0
