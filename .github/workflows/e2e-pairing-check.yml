@@ -114,6 +114,14 @@ jobs:
           is_covered() {
             local f="$1" g pat hit=1
             while IFS= read -r g; do
+              # covered_paths arrives as a YAML block scalar, where "#" is NOT a
+              # comment - it is part of the string. Callers naturally annotate
+              # each glob anyway, and an un-stripped annotation would silently
+              # make every pattern match nothing, so strip a trailing comment
+              # and surrounding whitespace here rather than let that happen.
+              g="${g%%#*}"
+              g="${g#"${g%%[![:space:]]*}"}"
+              g="${g%"${g##*[![:space:]]}"}"
               [ -z "$g" ] && continue
               case "$g" in
                 '!'*) pat="${g#!}"
