@@ -1,0 +1,169 @@
+name: Resolve luxodd_e2e ref
+description: >-
+  Decide which revision of the spec suite should test this pull request. THE
+  single implementation of that rule - preview-infra's preview-e2e.yml, the
+  e2e-pairing check and the repository_dispatch senders all call this, so the
+  rule cannot drift between them.
+
+inputs:
+  token:
+    description: Token with READ access to source_repo and suite_repo.
+    required: true
+  source_repo:
+    description: 'owner/name of the repo whose PR this is (pass github.repository).'
+    required: true
+  pr_number:
+    description: >-
+      The pull request number in source_repo. Empty is allowed and resolves to
+      the default branch, for workflows that also run on push.
+    required: false
+    default: ''
+  suite_repo:
+    description: The repository holding the specs.
+    required: false
+    default: luxodd/luxodd_e2e
+  on_problem:
+    description: >-
+      What to do when the PR names a branch that is invalid or does not exist.
+      "fail" (default) aborts, which is what a run that is about to execute
+      specs wants - falling back to the default branch is the defect this
+      removes. "report" instead returns source=unpaired with the reason in the
+      problem output, for an advisory check that must never fail a build.
+    required: false
+    default: fail
+
+outputs:
+  ref:
+    description: >-
+      The suite revision to run. Empty string means "the suite's default
+      branch", so it can be dropped straight into a dispatch payload without a
+      special case - actions/checkout and luxodd_e2e both treat empty that way.
+    value: ${{ steps.resolve.outputs.ref }}
+  source:
+    description: >-
+      How it was decided - directive, same-name, default, or unpaired when
+      on_problem=report and the named branch could not be used.
+    value: ${{ steps.resolve.outputs.source }}
+  problem:
+    description: Empty unless source=unpaired; otherwise why it could not resolve.
+    value: ${{ steps.resolve.outputs.problem }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve
+      id: resolve
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        SUITE_REPO: ${{ inputs.suite_repo }}
+        SOURCE_REPO: ${{ inputs.source_repo }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+        ON_PROBLEM: ${{ inputs.on_problem }}
+      run: |
+        set -uo pipefail
+
+        emit() {   # emit <ref> <source> [problem]
+          echo "ref=$1" >> "$GITHUB_OUTPUT"
+          echo "source=$2" >> "$GITHUB_OUTPUT"
+          echo "problem=${3:-}" >> "$GITHUB_OUTPUT"
+          echo "::notice::Suite revision: ${SUITE_REPO}@${1:-<default branch>} ($2)"
+          {
+            echo "### Suite revision"
+            echo
+            echo "Specs come from \`${SUITE_REPO}@${1:-<default branch>}\` ($2)."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        }
+
+        # A caller that is about to RUN specs must not proceed on a bad ref, so
+        # the default aborts. An advisory check passes on_problem=report and gets
+        # the same judgement back as data instead of as a failed build.
+        die() {
+          if [ "${ON_PROBLEM}" = "report" ]; then
+            echo "::warning::$1"
+            emit "" unpaired "$1"
+          fi
+          echo "::error::$1"
+          exit 1
+        }
+
+        # Refuse to run degraded. If jq or gh is missing, the extractions above
+        # would silently produce empty strings and the resolver would fall
+        # through to the default branch - the exact silent fallback this action
+        # exists to remove. (Both are preinstalled on ubuntu-latest; this guards
+        # self-hosted runners and local execution.)
+        for tool in gh jq; do
+          command -v "$tool" >/dev/null 2>&1             || { echo "::error::$tool is not installed on this runner; refusing to resolve a suite ref without it."; exit 1; }
+        done
+
+        # A branch that is ABSENT and a lookup that FAILED are different answers,
+        # and collapsing them is how a transient 500 silently changes which specs
+        # run. Only a real 404 counts as "no such branch"; anything else aborts
+        # after a couple of retries rather than guessing.
+        branch_exists() {
+          local name="$1" attempt out status
+          for attempt in 1 2 3; do
+            out=$(gh api -i "repos/${SUITE_REPO}/branches/${name}" 2>&1)
+            status=$(printf '%s' "$out" | sed -nE '1s#^HTTP/[0-9.]+ ([0-9]{3}).*#\1#p')
+            case "$status" in
+              200) return 0 ;;
+              404) return 1 ;;
+              403|429|5??) sleep $(( attempt * 3 )) ;;
+              *) sleep $(( attempt * 3 )) ;;
+            esac
+          done
+          die "could not determine whether ${SUITE_REPO}@${name} exists (last HTTP status: ${status:-unknown}). Refusing to guess which specs to run."
+        }
+
+        # No pull request in context (a push build, or a manual run): the default
+        # branch is the only defensible answer, and it is the previous behaviour.
+        if [ -z "${PR_NUMBER}" ] || [ "${PR_NUMBER}" = "null" ]; then
+          emit "" default
+        fi
+
+        # A failed lookup must not read as "no directive". Losing this
+        # distinction is how the resolver quietly reverts to the old behaviour
+        # that this whole change exists to remove.
+        if ! PR=$(gh api "repos/${SOURCE_REPO}/pulls/${PR_NUMBER}" 2>&1); then
+          die "could not read ${SOURCE_REPO}#${PR_NUMBER}: ${PR}"
+        fi
+
+        # The body and head ref are author-controlled. They reach this script as
+        # shell variables and are never interpolated into it, and a value is used
+        # only after it matches a conservative pattern AND is confirmed to exist.
+        BODY=$(printf '%s' "$PR" | jq -r '.body // ""')
+        HEAD_REF=$(printf '%s' "$PR" | jq -r '.head.ref // ""')
+
+        LINE=$(printf '%s' "$BODY" | tr -d '\r' \
+          | grep -iEm1 '^[[:space:]]*e2e-branch:[[:space:]]*[^[:space:]]+' || true)
+        # Take only the first token. Taking the rest of the line turned a
+        # trailing comment ("e2e-branch: foo  # paired") into part of the branch
+        # name and hard-failed the run.
+        DIRECTIVE=$(printf '%s' "$LINE" | sed -E 's/^[^:]*:[[:space:]]*([^[:space:]]+).*$/\1/')
+
+        if [ -n "$DIRECTIVE" ]; then
+          # The key is matched case-insensitively, so the value must be too.
+          case "$(printf '%s' "$DIRECTIVE" | tr '[:upper:]' '[:lower:]')" in
+            none|main|default)
+              echo "::notice::The PR body pins the suite to its default branch."
+              emit "" default ;;
+          esac
+          if ! printf '%s' "$DIRECTIVE" | grep -qE '^[A-Za-z0-9._/-]{1,200}$' \
+            || printf '%s' "$DIRECTIVE" | grep -q '\.\.'; then
+            die "the e2e-branch line in the PR body is not a valid branch name."
+          fi
+          if branch_exists "$DIRECTIVE"; then
+            emit "$DIRECTIVE" directive
+          fi
+          # A hard failure, not a silent fallback: falling back to the default
+          # branch is exactly the defect this change removes, and a typo that
+          # quietly restored it would be invisible.
+          die "the PR body asks for ${SUITE_REPO}@${DIRECTIVE}, which does not exist. Push that branch, or correct the e2e-branch line."
+        fi
+
+        if [ -n "$HEAD_REF" ] && [ "$HEAD_REF" != "null" ] && branch_exists "$HEAD_REF"; then
+          emit "$HEAD_REF" same-name
+        fi
+
+        emit "" default
