@@ -103,7 +103,8 @@ jobs:
           chk "t2 source"   "same-name"      "$T2_SRC"
           chk "t2 ref"      "$HEAD_REF"      "$T2_REF"
           chk "t3 source"   "unpaired"       "$T3_SRC"
-          [ -n "$T3_PROBLEM" ] && echo "ok    t3 problem is populated" || { echo "::error::t3 problem is empty"; rc=1; }
+          if [ -n "$T3_PROBLEM" ]; then echo "ok    t3 problem is populated"
+          else echo "::error::t3 problem is empty"; rc=1; fi
           chk "t4 outcome"  "failure"        "$T4_OUTCOME"
           chk "t5 source"   "default"        "$T5_SRC"
           exit $rc
