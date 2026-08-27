@@ -1,12 +1,16 @@
 # Reusable e2e-pairing check.
 #
 # WHAT IT IS FOR. The end-to-end specs live in luxodd/luxodd_e2e, so a product
-# change and the spec change covering it cannot merge atomically. preview-e2e
-# and the luxodd_e2e dispatch path now resolve the suite revision from the pull
-# request -- an "e2e-branch: <ref>" line in the body, or a branch of the same
-# name -- which removes the merge-order trap. This check is what makes that
-# convention discoverable: it reports, on every pull request, which suite
-# revision the PR resolves to and whether that is what the author intended.
+# change and the spec change covering it cannot merge atomically. The E2E runs
+# now resolve the suite revision from the pull request -- an "e2e-branch: <ref>"
+# line in the body, or a branch of the same name -- which removes the
+# merge-order trap. This check makes that convention discoverable: it reports,
+# on every pull request, which revision it resolves to.
+#
+# THE RULE ITSELF IS NOT IMPLEMENTED HERE. It lives in the resolve-e2e-ref
+# action beside this file, which the preview-e2e workflow and the
+# repository_dispatch senders also call. Three copies of it drifted in four
+# separate ways within a day of being written, which is why there is now one.
 #
 # WHY IT DEFAULTS TO ADVISORY, AND THE NUMBER BEHIND THAT. Replaying the rules
 # over the last 100 merged pull requests in each of admin, ext-game-server-
@@ -14,16 +18,8 @@
 # changed paths would have failed 303 of them -- 76%. Most product changes
 # genuinely need no spec change, so "you touched src/, therefore pair a branch"
 # is not a true premise, and a check that is wrong three times in four teaches
-# people to type "e2e-branch: none" without reading. So the default is
-# advisory: it always concludes success and says what it found. Set
-# enforcement: required only once covered_paths has been narrowed to paths that
-# really do imply a spec change, and re-run that measurement first.
-#
-# WHY THE LOGIC IS HERE. Four copies of a resolution rule is the duplication
-# this whole effort exists to remove, and the recon that preceded it found real
-# drift in the checks that were copied: three of the four repos carry a bot
-# test that no longer matches the release bot. Callers pass only what genuinely
-# differs -- their own paths.
+# people to type "e2e-branch: none" without reading. Set enforcement: required
+# only once covered_paths has been narrowed, and re-run that measurement first.
 name: "E2E Pairing Check (reusable)"
 
 on:
@@ -32,9 +28,11 @@ on:
       covered_paths:
         description: >-
           Newline-separated globs, repo-relative, naming paths whose change the
-          e2e suite could observe. A leading "!" excludes. Matched with bash
-          `case`, where `*` crosses `/`, so "src/*" covers the whole subtree;
-          "**" is accepted and behaves the same way.
+          e2e suite could observe. A leading "!" excludes, and later patterns
+          win. Matched with bash `case`, where `*` crosses `/`, so "src/*"
+          covers the whole subtree. A trailing "# comment" on a line is stripped,
+          because covered_paths is a YAML block scalar where "#" is NOT a
+          comment and an annotated glob would otherwise match nothing at all.
         type: string
         required: true
       enforcement:
@@ -58,19 +56,29 @@ on:
         type: string
         required: false
         default: luxodd/luxodd_e2e
+      run_surface:
+        description: >-
+          How this repo's E2E actually runs, named in the advisory text so the
+          message is true for the reader. "Preview E2E" for the repos that go
+          through preview environments, "the E2E run" for the ones that dispatch.
+        type: string
+        required: false
+        default: The E2E run
     secrets:
       SUITE_READ_TOKEN:
         description: >-
-          A token with READ access to suite_repo, used only to ask whether a
-          branch exists. Every product repo already holds E2E_REPO_TOKEN for
-          dispatching into luxodd_e2e; pass that. Declared explicitly rather
-          than taken via `secrets: inherit`, so this workflow receives one
+          A token with READ access to BOTH the calling repository (to read the
+          pull request and its changed files) and suite_repo (to ask whether a
+          branch exists). Every product repo already holds E2E_REPO_TOKEN, which
+          it uses to dispatch into luxodd_e2e; pass that. Declared explicitly
+          rather than taken via `secrets: inherit`, so this workflow receives one
           credential instead of every credential its caller holds. Note that
           CROSS_REPO_PAT is NOT present in cabinet and would not work there.
         required: true
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   e2e-pairing:
@@ -78,22 +86,40 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      # No checkout. This job reads pull-request METADATA and never fetches or
-      # runs the contributor's code, which is what makes it safe to drive from
-      # a `pull_request_target` stub -- the same argument polinrider-scan.yml
-      # makes, and the reason the gate cannot be disabled by the PR it guards.
+      # No checkout anywhere in this job. It reads pull-request METADATA and
+      # never fetches or runs the contributor's code, which is what makes it
+      # safe to drive from a `pull_request_target` stub -- the same argument
+      # polinrider-scan.yml makes, and the reason the gate cannot be disabled by
+      # the pull request it guards.
+      #
+      # on_problem: report, because an advisory check must never fail a build.
+      # The resolver returns source=unpaired plus a reason instead of aborting,
+      # and this job decides what to do with that.
       - name: Resolve the paired spec revision
+        id: resolve
+        uses: luxodd/global-ci/.github/actions/resolve-e2e-ref@main
+        with:
+          token: ${{ secrets.SUITE_READ_TOKEN }}
+          source_repo: ${{ github.repository }}
+          pr_number: ${{ github.event.pull_request.number }}
+          suite_repo: ${{ inputs.suite_repo }}
+          on_problem: report
+
+      - name: Report
         env:
           GH_TOKEN: ${{ secrets.SUITE_READ_TOKEN }}
           SUITE_REPO: ${{ inputs.suite_repo }}
           COVERED_PATHS: ${{ inputs.covered_paths }}
           ENFORCEMENT: ${{ inputs.enforcement }}
           BYPASS_LABELS: ${{ inputs.bypass_labels }}
+          RUN_SURFACE: ${{ inputs.run_surface }}
+          RESOLVED_REF: ${{ steps.resolve.outputs.ref }}
+          RESOLVED_SOURCE: ${{ steps.resolve.outputs.source }}
+          RESOLVED_PROBLEM: ${{ steps.resolve.outputs.problem }}
           # Author-controlled, and passed as environment variables on purpose:
-          # `${{ github.event.pull_request.body }}` inline in a run: block is a
+          # `${{ github.event.pull_request.* }}` inline in a run: block is a
           # shell-injection sink, and a PR body is the easiest thing on GitHub
           # for an outsider to write.
-          PR_BODY: ${{ github.event.pull_request.body }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
@@ -107,18 +133,12 @@ jobs:
           COVERED_HITS=""
           note() { printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"; }
 
-          branch_exists() { gh api "repos/${SUITE_REPO}/branches/$1" >/dev/null 2>&1; }
-
-          # Later patterns win, so an exclusion placed after an inclusion
-          # removes those files -- the order callers naturally write.
+          # covered_paths is a YAML block scalar: "#" is part of the string, not
+          # a comment. Callers annotate each glob, so strip it here rather than
+          # let every pattern silently match nothing.
           is_covered() {
             local f="$1" g pat hit=1
             while IFS= read -r g; do
-              # covered_paths arrives as a YAML block scalar, where "#" is NOT a
-              # comment - it is part of the string. Callers naturally annotate
-              # each glob anyway, and an un-stripped annotation would silently
-              # make every pattern match nothing, so strip a trailing comment
-              # and surrounding whitespace here rather than let that happen.
               g="${g%%#*}"
               g="${g#"${g%%[![:space:]]*}"}"
               g="${g%"${g##*[![:space:]]}"}"
@@ -144,11 +164,10 @@ jobs:
 
           # No bot can reason about specs, and the release bot's real login is a
           # GitHub App account, not "release-please[bot]" -- three of the four
-          # repos already carry a stale exact-match test that never fires.
+          # product repos carry a stale exact-match test that never fires.
           is_bot() {
             case "$1" in
-              *'[bot]') return 0 ;;
-              *release-please*) return 0 ;;
+              *'[bot]'|*release-please*) return 0 ;;
             esac
             return 1
           }
@@ -168,9 +187,24 @@ jobs:
             decide SKIP "author ${PR_AUTHOR} is an automation account"
           elif [ -n "$BYPASSED" ]; then
             decide SKIP "the '${BYPASSED}' label bypasses this check"
+
+          # ---- a named branch that does not work is ALWAYS worth saying ------
+          # This is checked BEFORE the covered-paths test on purpose. An
+          # e2e-branch line that the real resolvers hard-reject would otherwise
+          # be reported as a clean PASS on any PR that happened to touch no
+          # covered path, and the author would discover it only when the E2E run
+          # aborted.
+          elif [ "${RESOLVED_SOURCE}" = "unpaired" ]; then
+            decide UNPAIRED "names a spec branch that cannot be used: ${RESOLVED_PROBLEM}"
+
           else
             # ---- covered paths ---------------------------------------------
-            CHANGED=$(gh api --paginate "repos/${SOURCE_REPO}/pulls/${PR_NUMBER}/files" --jq '.[].filename')
+            # Fail CLOSED. Treating an API error as "nothing covered" would turn
+            # every outage into a green check that examined nothing.
+            if ! CHANGED=$(gh api --paginate "repos/${SOURCE_REPO}/pulls/${PR_NUMBER}/files" --jq '.[].filename' 2>&1); then
+              echo "::error::could not list files for ${SOURCE_REPO}#${PR_NUMBER}: ${CHANGED}"
+              exit 1
+            fi
             while IFS= read -r f; do
               [ -z "$f" ] && continue
               is_covered "$f" && COVERED_HITS="${COVERED_HITS}${f}"$'\n'
@@ -178,31 +212,12 @@ jobs:
 
             if [ -z "$COVERED_HITS" ]; then
               decide PASS "no files the e2e suite observes were changed"
+            elif [ "${RESOLVED_SOURCE}" = "directive" ]; then
+              decide PASS "paired with ${SUITE_REPO}@${RESOLVED_REF}, named in the PR body"
+            elif [ "${RESOLVED_SOURCE}" = "same-name" ]; then
+              decide PASS "paired with ${SUITE_REPO}@${RESOLVED_REF}, a branch of the same name"
             else
-              # ---- the directive -------------------------------------------
-              LINE=$(printf '%s' "${PR_BODY}" | tr -d '\r' \
-                | grep -iEm1 '^[[:space:]]*e2e-branch:[[:space:]]*[^[:space:]]+' || true)
-              DIRECTIVE=$(printf '%s' "$LINE" | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d '[:space:]')
-
-              if [ -n "$DIRECTIVE" ]; then
-                case "$DIRECTIVE" in
-                  none) decide PASS "author declared no spec change is needed" ;;
-                  main) decide PASS "author pinned the suite to main" ;;
-                  *)
-                    if ! printf '%s' "$DIRECTIVE" | grep -qE '^[A-Za-z0-9._/-]{1,200}$' \
-                      || printf '%s' "$DIRECTIVE" | grep -q '\.\.'; then
-                      decide UNPAIRED "the e2e-branch line is not a valid branch name"
-                    elif branch_exists "$DIRECTIVE"; then
-                      decide PASS "paired with ${SUITE_REPO}@${DIRECTIVE}, named in the PR body"
-                    else
-                      decide UNPAIRED "the PR body names ${SUITE_REPO}@${DIRECTIVE}, which does not exist"
-                    fi ;;
-                esac
-              elif [ -n "${HEAD_REF}" ] && [ "${HEAD_REF}" != "null" ] && branch_exists "${HEAD_REF}"; then
-                decide PASS "paired with ${SUITE_REPO}@${HEAD_REF}, a branch of the same name"
-              else
-                decide UNPAIRED "changes files the e2e suite observes and names no paired spec branch"
-              fi
+              decide UNPAIRED "changes files the e2e suite observes but names no paired spec branch"
             fi
           fi
 
@@ -213,8 +228,6 @@ jobs:
           if [ "$VERDICT" != "UNPAIRED" ]; then
             echo "::notice::${DETAIL}"
             note "${VERDICT} - ${DETAIL}."
-            note ""
-            note "Preview E2E will run the suite at the revision named above."
             exit 0
           fi
 
@@ -226,15 +239,19 @@ jobs:
           note "e2e-branch: your-branch-name"
           note '```'
           note ""
-          note "Put that line anywhere in this PR's description. Preview E2E then checks out **that** revision, so your spec change is exercised against your own preview instead of being tested by specs that predate it. Naming the suite branch the same as \`${HEAD_REF}\` also works, with no line at all."
+          note "Put that line anywhere in this PR's description. ${RUN_SURFACE} then checks out **that** revision, so your spec change is exercised against this change instead of being tested by specs that predate it. Naming the suite branch the same as \`${HEAD_REF}\` also works, with no line at all."
           note ""
           note "If no spec change is needed, \`e2e-branch: none\` says so on the record."
           note ""
-          note "<details><summary>Files this PR changed that the suite observes</summary>"
-          note ""
-          while IFS= read -r h; do [ -n "$h" ] && note "- \`$h\`"; done <<<"$COVERED_HITS"
-          note ""
-          note "</details>"
+          note "Editing this PR's description re-runs this check."
+          if [ -n "$COVERED_HITS" ]; then
+            note ""
+            note "<details><summary>Files this PR changed that the suite observes</summary>"
+            note ""
+            while IFS= read -r h; do [ -n "$h" ] && note "- \`$h\`"; done <<<"$COVERED_HITS"
+            note ""
+            note "</details>"
+          fi
 
           if [ "$ENFORCEMENT" = "required" ]; then
             echo "::error::${DETAIL}"
