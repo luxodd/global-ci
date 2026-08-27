@@ -1,0 +1,109 @@
+name: resolve-e2e-ref self-test
+
+# Runs the composite action for real, inside Actions, on every PR to this repo.
+# Because pull_request executes the MERGE COMMIT's files, this exercises the
+# PR's version of the action before it merges - it is how the action was proven
+# before anything referenced it at @main, and it stays as its regression suite.
+#
+# It uses only GITHUB_TOKEN. That cannot read luxodd_e2e, so the cross-repo
+# same-name case is exercised against THIS repository as the suite instead: the
+# rule does not care which repo holds the specs, and this repo's own PR head
+# branch is a branch the token can always see.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  self-test:
+    name: Resolve against real PRs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Case 1: this PR, suite = luxodd_e2e. GITHUB_TOKEN cannot see that repo,
+      # so branch_exists answers 404 and the resolver must land on default.
+      - name: default path
+        id: t1
+        uses: ./.github/actions/resolve-e2e-ref
+        with:
+          token: ${{ github.token }}
+          source_repo: ${{ github.repository }}
+          pr_number: ${{ github.event.pull_request.number }}
+
+      # Case 2: this PR, suite = THIS repo. The PR's own head branch exists
+      # here by definition, so the same-name rule must fire.
+      - name: same-name path
+        id: t2
+        uses: ./.github/actions/resolve-e2e-ref
+        with:
+          token: ${{ github.token }}
+          source_repo: ${{ github.repository }}
+          pr_number: ${{ github.event.pull_request.number }}
+          suite_repo: ${{ github.repository }}
+
+      # Case 3: a PR that does not exist, report mode - must succeed and answer
+      # unpaired, because the advisory check may never fail a build.
+      - name: report mode on a missing PR
+        id: t3
+        uses: ./.github/actions/resolve-e2e-ref
+        with:
+          token: ${{ github.token }}
+          source_repo: ${{ github.repository }}
+          pr_number: '99999999'
+          on_problem: report
+
+      # Case 4: the same missing PR, fail mode - must FAIL, because a caller
+      # about to run specs must not proceed on a ref nobody could verify.
+      - name: fail mode on a missing PR
+        id: t4
+        continue-on-error: true
+        uses: ./.github/actions/resolve-e2e-ref
+        with:
+          token: ${{ github.token }}
+          source_repo: ${{ github.repository }}
+          pr_number: '99999999'
+
+      # Case 5: no PR number at all (the push-build shape) - default.
+      - name: empty pr_number
+        id: t5
+        uses: ./.github/actions/resolve-e2e-ref
+        with:
+          token: ${{ github.token }}
+          source_repo: ${{ github.repository }}
+          pr_number: ''
+
+      - name: Assert
+        env:
+          T1_REF: ${{ steps.t1.outputs.ref }}
+          T1_SRC: ${{ steps.t1.outputs.source }}
+          T2_REF: ${{ steps.t2.outputs.ref }}
+          T2_SRC: ${{ steps.t2.outputs.source }}
+          T3_SRC: ${{ steps.t3.outputs.source }}
+          T3_PROBLEM: ${{ steps.t3.outputs.problem }}
+          T4_OUTCOME: ${{ steps.t4.outcome }}
+          T5_SRC: ${{ steps.t5.outputs.source }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -u
+          rc=0
+          chk() { # chk <desc> <want> <got>
+            if [ "$2" = "$3" ]; then echo "ok    $1 -> $3"
+            else echo "::error::FAIL $1 -> got '$3', want '$2'"; rc=1; fi
+          }
+          chk "t1 source"   "default"        "$T1_SRC"
+          chk "t1 ref"      ""               "$T1_REF"
+          chk "t2 source"   "same-name"      "$T2_SRC"
+          chk "t2 ref"      "$HEAD_REF"      "$T2_REF"
+          chk "t3 source"   "unpaired"       "$T3_SRC"
+          [ -n "$T3_PROBLEM" ] && echo "ok    t3 problem is populated" || { echo "::error::t3 problem is empty"; rc=1; }
+          chk "t4 outcome"  "failure"        "$T4_OUTCOME"
+          chk "t5 source"   "default"        "$T5_SRC"
+          exit $rc

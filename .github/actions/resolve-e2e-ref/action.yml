@@ -88,6 +88,15 @@ runs:
           exit 1
         }
 
+        # Refuse to run degraded. If jq or gh is missing, the extractions above
+        # would silently produce empty strings and the resolver would fall
+        # through to the default branch - the exact silent fallback this action
+        # exists to remove. (Both are preinstalled on ubuntu-latest; this guards
+        # self-hosted runners and local execution.)
+        for tool in gh jq; do
+          command -v "$tool" >/dev/null 2>&1             || { echo "::error::$tool is not installed on this runner; refusing to resolve a suite ref without it."; exit 1; }
+        done
+
         # A branch that is ABSENT and a lookup that FAILED are different answers,
         # and collapsing them is how a transient 500 silently changes which specs
         # run. Only a real 404 counts as "no such branch"; anything else aborts
