@@ -27,7 +27,9 @@ permissions:
 jobs:
   polinrider-scan:
     name: "PolinRider Malware Scan"      # required-check context = "<caller-job> / PolinRider Malware Scan"
-    runs-on: ubuntu-latest
+    # The caller's runner: Ubicloud where the repo sets LINUX_RUNNER (ext, server and admin do),
+    # GitHub-hosted otherwise. Either way each job gets a fresh VM, and the target is only read.
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-latest' }}
     steps:
       - name: Refuse to scan with an empty ref
         if: inputs.ref == ''
